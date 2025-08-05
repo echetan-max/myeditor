@@ -4,7 +4,7 @@ import { Timeline } from './Timeline';
 import { ZoomControls } from './ZoomControls';
 import { Header } from './Header';
 import { FileImport } from './FileImport';
-import { ExportModal } from './ExportModal';
+import { VideoExportModal } from './VideoExportModal';
 import { SakDataImport } from './SakDataImport';
 import { AutoZoomRecorder } from './AutoZoomRecorder';
 import { TextOverlayComponent } from './TextOverlay';
@@ -379,9 +379,9 @@ export const VideoEditor: React.FC = () => {
       </div>
 
       {showExportModal && (
-        <ExportModal
+        <VideoExportModal
           videoFile={videoFile}
-          zoomEffects={zoomEffects} // Pass all zoom effects, let ExportModal handle filtering
+          zoomEffects={zoomEffects} // Pass all zoom effects, let VideoExportModal handle filtering
           textOverlays={textOverlays}
           duration={duration}
           onClose={() => setShowExportModal(false)}
