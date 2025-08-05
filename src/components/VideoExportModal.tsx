@@ -4,6 +4,20 @@ import { FFmpeg } from '@ffmpeg/ffmpeg';
 import { fetchFile, toBlobURL } from '@ffmpeg/util';
 import { ZoomEffect, TextOverlay, getExportInterpolatedZoom } from '../types';
 
+// Test CDN connectivity
+const testCDNConnectivity = async (baseURL: string): Promise<boolean> => {
+  try {
+    const response = await fetch(`${baseURL}/ffmpeg-core.js`, { 
+      method: 'HEAD',
+      mode: 'cors'
+    });
+    return response.ok;
+  } catch (error) {
+    console.warn(`CDN connectivity test failed for ${baseURL}:`, error);
+    return false;
+  }
+};
+
 interface VideoExportModalProps {
   videoFile: File;
   zoomEffects: ZoomEffect[];
@@ -75,15 +89,75 @@ export const VideoExportModal: React.FC<VideoExportModalProps> = ({
     setStatusMessage('Loading FFmpeg...');
     setExportProgress(5);
 
-         const baseURL = 'https://unpkg.com/@ffmpeg/core@0.12.10/dist/esm';
-     await ffmpeg.load({
-       coreURL: await toBlobURL(`${baseURL}/ffmpeg-core.js`, 'text/javascript'),
-       wasmURL: await toBlobURL(`${baseURL}/ffmpeg-core.wasm`, 'application/wasm'),
-       workerURL: await toBlobURL(`${baseURL}/ffmpeg-core.worker.js`, 'text/javascript'),
-     });
+    // Try multiple CDNs for better reliability and CORS support
+    const allCdnUrls = [
+      'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.10/dist/esm',
+      // Use proxy in development to avoid CORS issues
+      ...(import.meta.env.DEV ? ['/cdn-proxy/npm/@ffmpeg/core@0.12.10/dist/esm'] : []),
+      'https://unpkg.com/@ffmpeg/core@0.12.10/dist/esm',
+      'https://cdn.skypack.dev/@ffmpeg/core@0.12.10/dist/esm'
+    ];
 
-    setExportProgress(10);
-    return ffmpeg;
+    // Test connectivity to CDNs first (skip for proxy URLs)
+    const cdnUrls: string[] = [];
+    for (const url of allCdnUrls) {
+      if (url.startsWith('/cdn-proxy')) {
+        cdnUrls.unshift(url); // Prioritize proxy in development
+      } else {
+        const isAccessible = await testCDNConnectivity(url);
+        if (isAccessible) {
+          cdnUrls.push(url);
+        } else {
+          console.warn(`CDN ${url} is not accessible, skipping`);
+        }
+      }
+    }
+
+    if (cdnUrls.length === 0) {
+      throw new Error('No accessible CDNs found. Please check your internet connection.');
+    }
+
+    let lastError: Error | null = null;
+    
+    for (const baseURL of cdnUrls) {
+      try {
+        console.log(`Attempting to load FFmpeg from: ${baseURL}`);
+        
+        // Add timeout to prevent hanging on slow networks
+        const loadWithTimeout = async () => {
+          const controller = new AbortController();
+          const timeoutId = setTimeout(() => controller.abort(), 30000); // 30 second timeout
+          
+          try {
+            const [coreURL, wasmURL, workerURL] = await Promise.all([
+              toBlobURL(`${baseURL}/ffmpeg-core.js`, 'text/javascript'),
+              toBlobURL(`${baseURL}/ffmpeg-core.wasm`, 'application/wasm'),
+              toBlobURL(`${baseURL}/ffmpeg-core.worker.js`, 'text/javascript'),
+            ]);
+            
+            clearTimeout(timeoutId);
+            return { coreURL, wasmURL, workerURL };
+          } catch (error) {
+            clearTimeout(timeoutId);
+            throw error;
+          }
+        };
+        
+        const { coreURL, wasmURL, workerURL } = await loadWithTimeout();
+        
+        await ffmpeg.load({ coreURL, wasmURL, workerURL });
+        
+        console.log(`Successfully loaded FFmpeg from: ${baseURL}`);
+        setExportProgress(10);
+        return ffmpeg;
+      } catch (error) {
+        console.warn(`Failed to load FFmpeg from ${baseURL}:`, error);
+        lastError = error as Error;
+        continue;
+      }
+    }
+    
+    throw new Error(`Failed to load FFmpeg from all CDNs. Last error: ${lastError?.message}`);
   };
 
   const getFilteredZoomEffects = (): ZoomEffect[] => {
@@ -400,7 +474,21 @@ export const VideoExportModal: React.FC<VideoExportModalProps> = ({
     } catch (error) {
       console.error('Export error:', error);
       setExportStatus('error');
-      setStatusMessage(error instanceof Error ? error.message : 'Export failed');
+      
+      let errorMessage = 'Export failed';
+      if (error instanceof Error) {
+        if (error.message.includes('Failed to fetch')) {
+          errorMessage = 'Network error: Unable to load FFmpeg. Please check your internet connection and try again.';
+        } else if (error.message.includes('CORS')) {
+          errorMessage = 'CORS error: Unable to load FFmpeg from CDN. Please try refreshing the page.';
+        } else if (error.message.includes('Failed to load FFmpeg from all CDNs')) {
+          errorMessage = 'Unable to load FFmpeg from any CDN. Please check your internet connection and try again.';
+        } else {
+          errorMessage = error.message;
+        }
+      }
+      
+      setStatusMessage(errorMessage);
       setExportProgress(0);
     } finally {
       setIsExporting(false);
