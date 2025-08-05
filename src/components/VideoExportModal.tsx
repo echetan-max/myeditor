@@ -54,37 +54,75 @@ export const VideoExportModal: React.FC<VideoExportModalProps> = ({
     onClose();
   };
 
-  const initializeFFmpeg = async (): Promise<FFmpeg> => {
-    if (ffmpegRef.current) {
-      return ffmpegRef.current;
-    }
+     const initializeFFmpeg = async (): Promise<FFmpeg> => {
+     if (ffmpegRef.current) {
+       return ffmpegRef.current;
+     }
 
-    const ffmpeg = new FFmpeg();
-    ffmpegRef.current = ffmpeg;
+     const ffmpeg = new FFmpeg();
+     ffmpegRef.current = ffmpeg;
 
-    ffmpeg.on('log', ({ message }) => {
-      console.log('FFmpeg:', message);
-    });
-
-    ffmpeg.on('progress', ({ progress }) => {
-      if (progress > 0) {
-        setExportProgress(Math.min(80 + (progress * 15), 95)); // Reserve 5% for final processing
-      }
-    });
-
-    setStatusMessage('Loading FFmpeg...');
-    setExportProgress(5);
-
-         const baseURL = 'https://unpkg.com/@ffmpeg/core@0.12.10/dist/esm';
-     await ffmpeg.load({
-       coreURL: await toBlobURL(`${baseURL}/ffmpeg-core.js`, 'text/javascript'),
-       wasmURL: await toBlobURL(`${baseURL}/ffmpeg-core.wasm`, 'application/wasm'),
-       workerURL: await toBlobURL(`${baseURL}/ffmpeg-core.worker.js`, 'text/javascript'),
+     ffmpeg.on('log', ({ message }) => {
+       console.log('FFmpeg:', message);
      });
 
-    setExportProgress(10);
-    return ffmpeg;
-  };
+     ffmpeg.on('progress', ({ progress }) => {
+       if (progress > 0) {
+         setExportProgress(Math.min(80 + (progress * 15), 95)); // Reserve 5% for final processing
+       }
+     });
+
+     setStatusMessage('Loading FFmpeg...');
+     setExportProgress(5);
+
+     // Try multiple CDN sources for better reliability
+     const cdnSources = [
+       'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.10/dist/esm',
+       'https://unpkg.com/@ffmpeg/core@0.12.10/dist/esm',
+       'https://cdn.skypack.dev/@ffmpeg/core@0.12.10/dist/esm'
+     ];
+
+     let lastError: Error | null = null;
+
+     for (const baseURL of cdnSources) {
+       try {
+         setStatusMessage(`Loading FFmpeg from ${new URL(baseURL).hostname}...`);
+         
+         await ffmpeg.load({
+           coreURL: await toBlobURL(`${baseURL}/ffmpeg-core.js`, 'text/javascript'),
+           wasmURL: await toBlobURL(`${baseURL}/ffmpeg-core.wasm`, 'application/wasm'),
+         });
+         
+         console.log(`Successfully loaded FFmpeg from ${baseURL}`);
+         break; // Success, exit the loop
+         
+       } catch (error) {
+         console.warn(`Failed to load FFmpeg from ${baseURL}:`, error);
+         lastError = error as Error;
+         
+         // If this is not the last CDN, continue to the next one
+         if (baseURL !== cdnSources[cdnSources.length - 1]) {
+           continue;
+         }
+         
+         // If all CDNs failed, try a simpler approach without toBlobURL
+         try {
+           setStatusMessage('Trying direct FFmpeg loading...');
+           const simpleBaseURL = 'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.10/dist/esm';
+           await ffmpeg.load({
+             coreURL: `${simpleBaseURL}/ffmpeg-core.js`,
+             wasmURL: `${simpleBaseURL}/ffmpeg-core.wasm`,
+           });
+           console.log('Successfully loaded FFmpeg with direct URLs');
+         } catch (directError) {
+           throw new Error(`Failed to load FFmpeg from all sources. CDN error: ${lastError?.message}, Direct error: ${(directError as Error)?.message}`);
+         }
+       }
+     }
+
+     setExportProgress(10);
+     return ffmpeg;
+   };
 
   const getFilteredZoomEffects = (): ZoomEffect[] => {
     return [...zoomEffects]
@@ -217,9 +255,101 @@ export const VideoExportModal: React.FC<VideoExportModalProps> = ({
       
       ctx.restore();
     }
-  };
+     };
 
-  const handleExport = async () => {
+   const handleWebMFallbackExport = async (): Promise<void> => {
+     const controller = abortControllerRef.current;
+     if (!controller) throw new Error('No abort controller available');
+
+     setStatusMessage('Preparing WebM export...');
+     setExportProgress(15);
+
+     // Create video element for frame extraction
+     const video = document.createElement('video');
+     video.src = URL.createObjectURL(videoFile);
+     video.muted = true;
+     video.playsInline = true;
+
+     await new Promise<void>((resolve, reject) => {
+       const timeout = setTimeout(() => reject(new Error('Video load timeout')), 10000);
+       video.onloadedmetadata = () => {
+         clearTimeout(timeout);
+         resolve();
+       };
+       video.onerror = () => {
+         clearTimeout(timeout);
+         reject(new Error('Failed to load video'));
+       };
+     });
+
+     // Setup canvas for rendering
+     const { width: targetWidth, height: targetHeight } = qualitySettings[exportSettings.quality];
+     const canvas = document.createElement('canvas');
+     canvas.width = targetWidth;
+     canvas.height = targetHeight;
+     const ctx = canvas.getContext('2d')!;
+
+     // Create MediaRecorder for WebM export
+     const stream = canvas.captureStream(exportSettings.fps);
+     const recorder = new MediaRecorder(stream, { 
+       mimeType: 'video/webm;codecs=vp9',
+       videoBitsPerSecond: 2500000 // 2.5 Mbps
+     });
+
+     const chunks: Blob[] = [];
+     recorder.ondataavailable = (e) => chunks.push(e.data);
+
+     const recordingPromise = new Promise<Blob>((resolve) => {
+       recorder.onstop = () => resolve(new Blob(chunks, { type: 'video/webm' }));
+     });
+
+     recorder.start();
+
+     // Calculate frame parameters
+     const fps = exportSettings.fps;
+     const totalFrames = Math.ceil(duration * fps);
+     const frameInterval = 1 / fps;
+
+     setStatusMessage('Recording WebM...');
+     setExportProgress(30);
+
+     // Render frames in real-time
+     for (let frame = 0; frame < totalFrames; frame++) {
+       if (controller.signal.aborted) throw new Error('Export cancelled');
+
+       const time = frame * frameInterval;
+       await renderVideoFrame(video, canvas, ctx, time, targetWidth, targetHeight);
+
+       // Update progress
+       const frameProgress = 30 + ((frame / totalFrames) * 60);
+       setExportProgress(frameProgress);
+
+       if (frame % 30 === 0) {
+         setStatusMessage(`Recording WebM... ${frame}/${totalFrames}`);
+       }
+
+       // Wait for next frame
+       await new Promise(resolve => setTimeout(resolve, 1000 / fps));
+     }
+
+     recorder.stop();
+     const webmBlob = await recordingPromise;
+
+     setStatusMessage('Finalizing WebM...');
+     setExportProgress(95);
+
+     // Download the WebM file
+     const url = URL.createObjectURL(webmBlob);
+     const a = document.createElement('a');
+     a.href = url;
+     a.download = `exported_video_${Date.now()}.webm`;
+     document.body.appendChild(a);
+     a.click();
+     document.body.removeChild(a);
+     URL.revokeObjectURL(url);
+   };
+
+   const handleExport = async () => {
     if (isExporting) return;
     
     setIsExporting(true);
@@ -397,15 +527,31 @@ export const VideoExportModal: React.FC<VideoExportModalProps> = ({
       setExportStatus('complete');
       setStatusMessage('Export completed successfully!');
       
-    } catch (error) {
-      console.error('Export error:', error);
-      setExportStatus('error');
-      setStatusMessage(error instanceof Error ? error.message : 'Export failed');
-      setExportProgress(0);
-    } finally {
-      setIsExporting(false);
-      abortControllerRef.current = null;
-    }
+         } catch (error) {
+       console.error('Export error:', error);
+       
+       // If FFmpeg fails, offer a WebM fallback
+       if (error instanceof Error && error.message.includes('FFmpeg')) {
+         setStatusMessage('FFmpeg failed, trying WebM fallback...');
+         try {
+           await handleWebMFallbackExport();
+           setExportStatus('complete');
+           setStatusMessage('Export completed using WebM fallback!');
+           setExportProgress(100);
+         } catch (fallbackError) {
+           setExportStatus('error');
+           setStatusMessage('Both FFmpeg and WebM export failed. Please try refreshing the page.');
+           setExportProgress(0);
+         }
+       } else {
+         setExportStatus('error');
+         setStatusMessage(error instanceof Error ? error.message : 'Export failed');
+         setExportProgress(0);
+       }
+     } finally {
+       setIsExporting(false);
+       abortControllerRef.current = null;
+     }
   };
 
   const getProgressColor = () => {
@@ -554,25 +700,59 @@ export const VideoExportModal: React.FC<VideoExportModalProps> = ({
               {exportStatus === 'complete' ? 'Close' : 'Cancel'}
             </button>
             
-            {exportStatus !== 'complete' && (
-              <button
-                onClick={handleExport}
-                disabled={isExporting}
-                className="px-4 py-2 bg-purple-600 text-white rounded-md hover:bg-purple-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center space-x-2"
-              >
-                {isExporting ? (
-                  <>
-                    <div className="animate-spin w-4 h-4 border-2 border-white border-t-transparent rounded-full" />
-                    <span>Exporting...</span>
-                  </>
-                ) : (
-                  <>
-                    <Download className="w-4 h-4" />
-                    <span>Export MP4</span>
-                  </>
-                )}
-              </button>
-            )}
+                         {exportStatus !== 'complete' && (
+               <>
+                 <button
+                   onClick={handleExport}
+                   disabled={isExporting}
+                   className="px-4 py-2 bg-purple-600 text-white rounded-md hover:bg-purple-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center space-x-2"
+                 >
+                   {isExporting ? (
+                     <>
+                       <div className="animate-spin w-4 h-4 border-2 border-white border-t-transparent rounded-full" />
+                       <span>Exporting...</span>
+                     </>
+                   ) : (
+                     <>
+                       <Download className="w-4 h-4" />
+                       <span>Export MP4</span>
+                     </>
+                   )}
+                 </button>
+                 
+                 {!isExporting && (
+                   <button
+                     onClick={async () => {
+                       setIsExporting(true);
+                       setExportStatus('processing');
+                       setExportProgress(0);
+                       setStatusMessage('Starting WebM export...');
+                       
+                       const controller = new AbortController();
+                       abortControllerRef.current = controller;
+                       
+                       try {
+                         await handleWebMFallbackExport();
+                         setExportStatus('complete');
+                         setStatusMessage('WebM export completed successfully!');
+                         setExportProgress(100);
+                       } catch (error) {
+                         setExportStatus('error');
+                         setStatusMessage(error instanceof Error ? error.message : 'WebM export failed');
+                         setExportProgress(0);
+                       } finally {
+                         setIsExporting(false);
+                         abortControllerRef.current = null;
+                       }
+                     }}
+                     className="px-3 py-2 bg-green-600 text-white rounded-md hover:bg-green-700 transition-colors text-sm"
+                     title="Export as WebM (faster, no FFmpeg required)"
+                   >
+                     WebM
+                   </button>
+                 )}
+               </>
+             )}
             
             {exportStatus === 'error' && (
               <button
