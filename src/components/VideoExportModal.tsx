@@ -495,15 +495,16 @@ export const VideoExportModal: React.FC<VideoExportModalProps> = ({
                 </label>
               </div>
               
-              <div className="bg-gray-700 rounded-lg p-4">
-                <h4 className="text-sm font-medium text-white mb-2">Export Summary</h4>
-                <div className="text-sm text-gray-300 space-y-1">
-                  <div>Duration: {duration.toFixed(1)}s</div>
-                  <div>Zoom Effects: {zoomEffects.length}</div>
-                  <div>Text Overlays: {textOverlays.length}</div>
-                  <div>Resolution: {qualitySettings[exportSettings.quality].width}x{qualitySettings[exportSettings.quality].height}</div>
-                </div>
-              </div>
+                             <div className="bg-gray-700 rounded-lg p-4">
+                 <h4 className="text-sm font-medium text-white mb-2">Export Summary</h4>
+                 <div className="text-sm text-gray-300 space-y-1">
+                   <div>Duration: {duration.toFixed(1)}s</div>
+                   <div>Zoom Effects: {getFilteredZoomEffects().length}</div>
+                   <div>Text Overlays: {textOverlays.length}</div>
+                   <div>Resolution: {qualitySettings[exportSettings.quality].width}x{qualitySettings[exportSettings.quality].height}</div>
+                   <div>Estimated Size: ~{Math.ceil(duration * 2)} MB</div>
+                 </div>
+               </div>
             </div>
           )}
           
